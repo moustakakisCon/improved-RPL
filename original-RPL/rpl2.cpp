@@ -144,7 +144,7 @@ public:
 
             }
        }
-         debug_->debug("%d\n",rpl_dag_structure.of);
+         //debug_->debug("%d\n",rpl_dag_structure.of);
         for (uint8_t i=0;i<=SENT_QUEUE;i++)
         {
             sent_timer_[i]=0xff;
@@ -166,13 +166,15 @@ public:
             rpl_dag_structure.version=5;
 
         }
-        if(radio_->id()==6)
+        if(radio_->id()==0)
         {
-           timer_->set_timer<rpl, &rpl::send_dao>( 15000, this, 0 );
+           timer_->set_timer<rpl, &rpl::send>( 25000, this, 0 );
         }
 
                     timer_->set_timer<rpl,
         &rpl::dio_output>( 5000, this, 0 );
+if(radio_->id()!=0)
+timer_->set_timer<rpl, &rpl::send_dao>( 15000, this, 0 );
 
            timer_->set_timer<rpl, &rpl::check_sent_timer>( 1000, this, 0 );
 
@@ -317,7 +319,7 @@ void dao_output (rpl_dag_t input_dag, uint16_t from)
         header.type=DAO;
         header.from_node = radio_->id();
         header.to_node = input_dag.parent;
-        debug_->debug("parent: %d\n", sequence_counter_  );
+       // debug_->debug("parent: %d\n", sequence_counter_  );
 
         dao.to=input_dag.root;
         dao.from=from;
@@ -360,6 +362,7 @@ void dao_input(header_t header, rpl_dao_t input_dao)
             if(neighbors[position][0]==header.from_node)
             {
                 //position=i;
+                neighbors[position][1]=header.from_node;
                 debug_->debug("neighbor: %d\n",neighbors[position][0]);
                 break;
             }
@@ -374,7 +377,7 @@ void dao_input(header_t header, rpl_dao_t input_dao)
         {
             uint16_t position_2;
             uint16_t temp=0xffff;
-            for (position_2=0;position_2<=NEIGHBOR_SIZE; position_2++)
+            for (position_2=2;position_2<=NEIGHBOR_SIZE; position_2++)
             {
                 if(neighbors[position][position_2]==0xffff && temp==0xffff)
                 {
@@ -485,14 +488,28 @@ void send_dao( void* )
 }
 
 //--------------------------------------------------------------------------------------------------------------------
-void data_output ( uint16_t dest, unsigned char input_data[DATA_SIZE])
+void data_output ( uint16_t dest, uint16_t from, unsigned char input_data[DATA_SIZE])
 {
+    if (dest!=radio_->id())
+    {
+
     header_t header;
     rpl_data_t data;
 
+    header.type=DATA;
     data.to = dest;
+    data.instance_id=rpl_dag_structure.instance_id;
+    if(from==radio_->id())
+    {
+        data.from=radio_->id();
+    }
+    else
+    data.from=from;
+
     header.from_node = radio_->id();
     header.to_node=0xffff; //flag (o Thanasis tha me misei gia ta tromera sxolia m)
+
+
     for (uint16_t i=0; i<=NEIGHBOR_SIZE; i++)
     {
        // if(i==0xffff)
@@ -505,6 +522,7 @@ void data_output ( uint16_t dest, unsigned char input_data[DATA_SIZE])
            if(radio_->id()!=rpl_dag_structure.root)
            {
                 header.to_node=rpl_dag_structure.parent;
+                //debug_->debug("debug1 i: %d\n",i);
                 break;
            }
        }
@@ -523,9 +541,44 @@ void data_output ( uint16_t dest, unsigned char input_data[DATA_SIZE])
 
            }
        }
-
-
     }
+
+
+    if(header.to_node!=0xffff)
+    {
+        debug_->debug("data.to: %d, data.from: %d, header.to: %d, header.from: %d\n", data.to, data.from, header.to_node, header.from_node);
+        memcpy(data.payload, input_data, DATA_SIZE);
+        uint16_t size;
+        size = sizeof(header_t)+sizeof(rpl_data_t);
+        unsigned char message[size];
+        memcpy(message, &header, sizeof(header_t));
+        memcpy(message+sizeof(header_t),&data, sizeof(rpl_data_t));
+        radio_->send( Os::Radio::BROADCAST_ADDRESS, size, message);
+    }
+    }
+
+}
+//--------------------------------------------------------------------------------------------------------------------
+void data_input(rpl_data_t data)
+{
+    if(data.instance_id==rpl_dag_structure.instance_id)
+    {
+        if(data.to==radio_->id())
+        {
+            //handle payload
+            debug_->debug("node %d received from %d\n", radio_->id(), data.from);
+
+        }
+        else
+        {
+            data_output(data.to, data.from, data.payload);
+        }
+    }
+}
+//--------------------------------------------------------------------------------------------------------------------
+void send ( void* )
+{
+    data_output(6, radio_->id(),(unsigned char *)"test_data");
 }
 //--------------------------------------------------------------------------------------------------------------------
 
@@ -578,6 +631,15 @@ uint16_t min_high_tree_OF(metrics_t input_metrics)
                 memcpy(&temp_dao_ack, buf+sizeof(header_t), sizeof(rpl_dao_ack_t));
                 handle_dao_ack(header, temp_dao_ack);
             }
+            break;
+        case DATA:
+            if(header.to_node==radio_->id())
+            {
+
+                rpl_data_t temp_data;
+                memcpy(&temp_data, buf+sizeof(header_t), sizeof(rpl_data_t));
+                data_input(temp_data);
+            }
         }
     }
 //--------------------------------------------------------------------------------------------------------------------
@@ -588,7 +650,7 @@ private:
         Os::Timer::self_pointer_t timer_;
         Os::Debug::self_pointer_t debug_;
 
-        uint16_t neighbors[NEIGHBOR_SIZE][NEIGHBOR_SIZE];
+        uint16_t neighbors[NEIGHBOR_SIZE][NEIGHBOR_SIZE+1];
         uint8_t hops_;
         uint16_t temp_rank;
         rpl_dag_t rpl_dag_structure;
