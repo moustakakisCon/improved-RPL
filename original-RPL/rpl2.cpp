@@ -4,9 +4,13 @@
 #include "external_interface/external_interface.h"
 #include "algorithms/routing/tree/tree_routing.h"
 
+#define ROOT_NODE 0x296
+#define SEND_TO 0xca3
+#define SEND_FROM 0x1cde
 
-#define NEIGHBOR_SIZE 255 //65534 is the maximum value. do NOT set this bigger than 255 never!
-#define SENT_QUEUE 0xff      //254 is the maximum value. do NOT set this bigger than 255 never!
+#define NEIGHBOR_SIZE 40 //65534 is the maximum value. do NOT set this bigger than 255 never!
+#define NEIGHBOR_WIDTH 40
+#define SENT_QUEUE 16      //254 is the maximum value. do NOT set this bigger than 255 never!
 
 #define OF_TO_USE 0x00
 #define MIN_HIGH_TREE 0x00
@@ -136,15 +140,15 @@ public:
 
        for(uint16_t j=0;j<NEIGHBOR_SIZE; j++)
        {
-            for (uint16_t i=0;i<NEIGHBOR_SIZE; i++)
+            for (uint16_t i=0;i<NEIGHBOR_WIDTH; i++)
             {
-                // debug_->debug("node: %d value: %d\n",radio_->id(), i);
+                // debug_->debug("node: %x value: %x",radio_->id(), i);
                 neighbors[j][i]=0xffff;
 
 
             }
        }
-         //debug_->debug("%d\n",rpl_dag_structure.of);
+         //debug_->debug("%x",rpl_dag_structure.of);
         for (uint8_t i=0;i<=SENT_QUEUE;i++)
         {
             sent_timer_[i]=0xff;
@@ -157,7 +161,7 @@ public:
 
         sequence_counter_=0x00;
 
-        if(radio_->id()==0)
+        if(radio_->id()==ROOT_NODE)
         {
             rpl_dag_structure.rank=0;
             rpl_dag_structure.root=radio_->id();
@@ -165,18 +169,18 @@ public:
             rpl_dag_structure.dag_metrics.metric1=0;
             rpl_dag_structure.version=5;
 
+            debug_->debug("IM ROOT");
+
         }
-        if(radio_->id()==0)
+        if(radio_->id()==SEND_FROM)
         {
-           timer_->set_timer<rpl, &rpl::send>( 25000, this, 0 );
+           timer_->set_timer<rpl, &rpl::send>( 60000, this, 0 );
         }
 
                     timer_->set_timer<rpl,
-        &rpl::dio_output>( 5000, this, 0 );
-if(radio_->id()!=0)
-timer_->set_timer<rpl, &rpl::send_dao>( 15000, this, 0 );
+        &rpl::dio_output>( 15000, this, 0 );
 
-           timer_->set_timer<rpl, &rpl::check_sent_timer>( 1000, this, 0 );
+           timer_->set_timer<rpl, &rpl::check_sent_timer>( 4000, this, 0 );
 
     }
 //--------------------------------------------------------------------------------------------------------------------
@@ -188,18 +192,22 @@ timer_->set_timer<rpl, &rpl::send_dao>( 15000, this, 0 );
         my_header.type=NEIGHBOR_DIS;
         my_header.from_node=radio_->id();
         radio_->send( Os::Radio::BROADCAST_ADDRESS, sizeof(header_t), ( Os::Radio::block_data_t*)&my_header );
-
+       // timer_->set_timer<rpl, &rpl::discover_neighbors>( 2000, this, 0 );
     }
 
 //--------------------------------------------------------------------------------------------------------------------
 
     void handle_neighbor_discovery (header_t inbox_header)
     {
-      //  debug_->debug("node %d received nd from node %d\n",radio_->id(), inbox_header.from_ipv6[0]);
+      //  debug_->debug("node %x received nd from node %x",radio_->id(), inbox_header.from_ipv6[0]);
         header_t header;
         header.type=NEIGHBOR_DIS_ACK;
        // header.to_ipv6[0]=inbox_header.from_ipv6[0];
        // header.from_ipv6[0]=radio_->id();
+
+       // test
+       handle_neighbor_discovery_ack(inbox_header);
+
         header.to_node=inbox_header.from_node;
         header.from_node=radio_->id();
         radio_->send( Os::Radio::BROADCAST_ADDRESS, sizeof(header_t), ( Os::Radio::block_data_t*)&header );
@@ -225,7 +233,7 @@ timer_->set_timer<rpl, &rpl::send_dao>( 15000, this, 0 );
         if(used==false)
         {
             neighbors[position][0]=inbox_header.from_node;
-            debug_->debug("node: %d added %d to list\n", radio_->id(), inbox_header.from_node);
+            debug_->debug("node: %x added %x to list\n", radio_->id(), inbox_header.from_node);
         }
     }
 //--------------------------------------------------------------------------------------------------------------------
@@ -241,26 +249,56 @@ void dio_output (void *)
 
     header_t header;
     header.type=DIO;
-    uint16_t size;
-    size = sizeof(header_t)+sizeof(rpl_dio_t);
-    unsigned char message[size];
-    memcpy(message, &header, sizeof(header_t));
-    memcpy(message+sizeof(header_t),&dio, sizeof(rpl_dio_t));
-   // debug_->debug("metric1: %d, version: %d\n", dio.dio_metrics.metric1, dio.version);
+    header.from_node=radio_->id();
+    for (uint16_t i=0;i<=NEIGHBOR_SIZE;i++)
+        {
+        if(neighbors[i][0]==0xffff)
+        {
+            break;
+        }
+        else
+        {
+            header.to_node=neighbors[i][0];
+        }
+        uint16_t size;
+        size = sizeof(header_t)+sizeof(rpl_dio_t);
+        unsigned char message[size];
+        memcpy(message, &header, sizeof(header_t));
+        memcpy(message+sizeof(header_t),&dio, sizeof(rpl_dio_t));
+   // debug_->debug("metric1: %x, version: %x", dio.dio_metrics.metric1, dio.version);
 
-    radio_->send( Os::Radio::BROADCAST_ADDRESS, size, message);
+        radio_->send( Os::Radio::BROADCAST_ADDRESS, size, message);
+   }
 
     timer_->set_timer<rpl, &rpl::dio_output>( 2000, this, 0 );
 
 }
 
 //--------------------------------------------------------------------------------------------------------------------
-void dio_input (rpl_dio_t input_dio)
+void dio_input (header_t header, rpl_dio_t input_dio)
 {
-            switch(rpl_dag_structure.of)
+    uint16_t i;
+          for (i=0;i<=NEIGHBOR_SIZE;i++)
+          {
+              if(i==NEIGHBOR_SIZE || i==0xffff)
+              {
+                  break;
+              }
+
+              if(neighbors[i][0]==header.from_node)
+              {
+                  break;
+              }
+          }
+
+          if(i!=NEIGHBOR_SIZE)
+          {
+
+              switch(rpl_dag_structure.of)
             {
                 case MIN_HIGH_TREE:
                 temp_rank=min_high_tree_OF(input_dio.dio_metrics);
+                // debug_->debug("node %d temp_rank: %d\n",radio_->id(),temp_rank);
                 break;
             }
 
@@ -272,8 +310,12 @@ void dio_input (rpl_dio_t input_dio)
                 rpl_dag_structure.version = input_dio.version;
                 rpl_dag_structure.dag_metrics.metric1 = input_dio.dio_metrics.metric1+1;
                 rpl_dag_structure.root = input_dio.root;
-                debug_->debug("node %d (metric1= %d) joined to parrent %d (metric1= %d)\n", radio_->id(),rpl_dag_structure.dag_metrics.metric1, rpl_dag_structure.parent, input_dio.dio_metrics.metric1);
-   }
+                if(radio_->id()!=ROOT_NODE){
+                timer_->set_timer<rpl, &rpl::send_dao>( 1000, this, 0 );
+                }
+                debug_->debug("node %x (metric1= %x) joined to parrent %x (metric1= %x)\n", radio_->id(),rpl_dag_structure.dag_metrics.metric1, rpl_dag_structure.parent, input_dio.dio_metrics.metric1);
+            }
+          }
 }
 //--------------------------------------------------------------------------------------------------------------------
 void dao_output (rpl_dag_t input_dag, uint16_t from)
@@ -282,23 +324,24 @@ void dao_output (rpl_dag_t input_dag, uint16_t from)
 
    for (sequence_counter_=0;sequence_counter_<=SENT_QUEUE;sequence_counter_++)
    {
-       if(sent_node_[sequence_counter_]==from && sent_node_[sequence_counter_]!=0xffff)
-       {
-           debug_->debug("node %d needs to resend from node %d\n", radio_->id(), from);
-           break;
-
-       }
-       if(sequence_counter_==0xff)
+              if(sequence_counter_==0xff || sequence_counter_==SENT_QUEUE)
                 {
                     break;
                 }
+       if(sent_node_[sequence_counter_]==from && sent_node_[sequence_counter_]!=0xffff)
+       {
+           debug_->debug("res1 node %x needs to resend to node %x from %x\n", radio_->id(), input_dag.parent, from);
+           break;
+
+       }
+
    }
 
-   if(sequence_counter_==0xff)
+   if(sequence_counter_==SENT_QUEUE)
    {
         for (sequence_counter_=0;sequence_counter_<=SENT_QUEUE;sequence_counter_++)
             {
-                if(sequence_counter_==SENT_QUEUE)
+                if(sequence_counter_==SENT_QUEUE || sequence_counter_==0xff)
                 {
                     break;
                 }
@@ -309,9 +352,10 @@ void dao_output (rpl_dag_t input_dag, uint16_t from)
                 }
 
             }
-//   }
+   }
     if (sequence_counter_!=SENT_QUEUE)
     {
+        debug_->debug("res2 node %x needs to resend to node %x from %x\n", radio_->id(), input_dag.parent, from);
 
         header_t header;
         rpl_dao_t dao;
@@ -319,7 +363,7 @@ void dao_output (rpl_dag_t input_dag, uint16_t from)
         header.type=DAO;
         header.from_node = radio_->id();
         header.to_node = input_dag.parent;
-       // debug_->debug("parent: %d\n", sequence_counter_  );
+       // debug_->debug("parent: %x", sequence_counter_  );
 
         dao.to=input_dag.root;
         dao.from=from;
@@ -337,10 +381,10 @@ void dao_output (rpl_dag_t input_dag, uint16_t from)
         memcpy(message+sizeof(header_t),&dao, sizeof(rpl_dao_t));
         radio_->send( Os::Radio::BROADCAST_ADDRESS, size, message);
 
+
+
+
     }
-
-
-}
 }
 //--------------------------------------------------------------------------------------------------------------------
 void dao_input(header_t header, rpl_dao_t input_dao)
@@ -354,7 +398,7 @@ void dao_input(header_t header, rpl_dao_t input_dao)
   if (input_dao.instance_id == rpl_dag_structure.instance_id)
   {
         send_dao_ack(header.from_node, input_dao.dao_sequence);
-        debug_->debug("sending DAO_ACK back to: %d\n",header.from_node);
+        debug_->debug("sending DAO_ACK back to: %x\n",header.from_node);
         uint16_t position;
 
         for (position=0;position<=NEIGHBOR_SIZE; position++)  // briskei ton geitona pou to esteile
@@ -363,7 +407,7 @@ void dao_input(header_t header, rpl_dao_t input_dao)
             {
                 //position=i;
                 neighbors[position][1]=header.from_node;
-                debug_->debug("neighbor: %d\n",neighbors[position][0]);
+                debug_->debug("neighbor: %x",neighbors[position][0]);
                 break;
             }
 
@@ -387,7 +431,7 @@ void dao_input(header_t header, rpl_dao_t input_dao)
                 }
                 else if (neighbors[position][position_2]==input_dao.from)
                 {
-                    //debug_->debug("neighbors[position][position_2]: %d\n",neighbors[position][position_2]);
+                    //debug_->debug("neighbors[position][position_2]: %x",neighbors[position][position_2]);
                     break;
                 }
 
@@ -400,7 +444,7 @@ void dao_input(header_t header, rpl_dao_t input_dao)
             if (position_2==NEIGHBOR_SIZE)
             {
                  neighbors[position][temp]=input_dao.from;
-                 debug_->debug("added: %d in position: %d and postion_2: %d\n",neighbors[position][temp],position,temp);
+                 debug_->debug("added: %x in position: %x and postion_2: %x\n",neighbors[position][temp],position,temp);
             }
         }
         if (radio_->id()!=input_dao.to)
@@ -461,13 +505,13 @@ void check_sent_timer ( void* )
             {
                 sent_timer_[i]=0xff;
                 sent_node_[i]=0xffff;
-                 //               debug_->debug("i1: %d\n", i);
+                 //               debug_->debug("i1: %x", i);
             }
             else if(sent_timer_[i]>=4)
             {
                 dao_output(rpl_dag_structure, sent_node_[i]);
-                //debug_->debug("sent_timer: %d\n", sent_timer_[i]);
-               // debug_->debug("i2: %d\n", i);
+                //debug_->debug("sent_timer: %x", sent_timer_[i]);
+               // debug_->debug("i2: %x", i);
             }
 
             if (sent_timer_[i] < 0xff)
@@ -479,7 +523,7 @@ void check_sent_timer ( void* )
 
 
     }
-    timer_->set_timer<rpl, &rpl::check_sent_timer>( 1000, this, 0 );
+    timer_->set_timer<rpl, &rpl::check_sent_timer>( 4000, this, 0 );
 }
 //--------------------------------------------------------------------------------------------------------------------
 void send_dao( void* )
@@ -490,6 +534,7 @@ void send_dao( void* )
 //--------------------------------------------------------------------------------------------------------------------
 void data_output ( uint16_t dest, uint16_t from, unsigned char input_data[DATA_SIZE])
 {
+    debug_->debug("%x will try to send\n",radio_->id());
     if (dest!=radio_->id())
     {
 
@@ -522,7 +567,7 @@ void data_output ( uint16_t dest, uint16_t from, unsigned char input_data[DATA_S
            if(radio_->id()!=rpl_dag_structure.root)
            {
                 header.to_node=rpl_dag_structure.parent;
-                //debug_->debug("debug1 i: %d\n",i);
+                //debug_->debug("debug1 i: %x",i);
                 break;
            }
        }
@@ -546,7 +591,7 @@ void data_output ( uint16_t dest, uint16_t from, unsigned char input_data[DATA_S
 
     if(header.to_node!=0xffff)
     {
-        debug_->debug("data.to: %d, data.from: %d, header.to: %d, header.from: %d\n", data.to, data.from, header.to_node, header.from_node);
+        debug_->debug("data.to: %x, data.from: %x, header.to: %x, header.from: %x\n", data.to, data.from, header.to_node, header.from_node);
         memcpy(data.payload, input_data, DATA_SIZE);
         uint16_t size;
         size = sizeof(header_t)+sizeof(rpl_data_t);
@@ -555,6 +600,8 @@ void data_output ( uint16_t dest, uint16_t from, unsigned char input_data[DATA_S
         memcpy(message+sizeof(header_t),&data, sizeof(rpl_data_t));
         radio_->send( Os::Radio::BROADCAST_ADDRESS, size, message);
     }
+    else
+    debug_->debug("found none\n");
     }
 
 }
@@ -566,7 +613,7 @@ void data_input(rpl_data_t data)
         if(data.to==radio_->id())
         {
             //handle payload
-            debug_->debug("node %d received from %d\n", radio_->id(), data.from);
+            debug_->debug("node %x received DATA from %x\n", radio_->id(), data.from);
 
         }
         else
@@ -578,7 +625,7 @@ void data_input(rpl_data_t data)
 //--------------------------------------------------------------------------------------------------------------------
 void send ( void* )
 {
-    data_output(6, radio_->id(),(unsigned char *)"test_data");
+    data_output(SEND_TO, radio_->id(),(unsigned char *)"test_data");
 }
 //--------------------------------------------------------------------------------------------------------------------
 
@@ -591,8 +638,9 @@ uint16_t min_high_tree_OF(metrics_t input_metrics)
     return input_metrics.metric1+1;
 }
 //--------------------------------------------------------------------------------------------------------------------
-    void receive_radio_message( Os::Radio::node_id_t from, Os::Radio::size_t len, Os::Radio::block_data_t *buf )
+    void receive_radio_message( Os::Radio::node_id_t from, Os::Radio::size_t len, Os::Radio::block_data_t *buf, const Os::Radio::ExtendedData& exdata )
     {
+        //debug_->debug("LQI: %d", 255 - exdata.link_metric());
         header_t header;
         memcpy(&header, buf, sizeof(header_t));
 
@@ -610,14 +658,17 @@ uint16_t min_high_tree_OF(metrics_t input_metrics)
             }
             break;
         case DIO:
-            rpl_dio_t temp_dio;
-            memcpy(&temp_dio, buf+sizeof(header_t), sizeof(rpl_dio_t));
-            dio_input(temp_dio);
+            if(header.to_node==radio_->id())
+            {
+                rpl_dio_t temp_dio;
+                memcpy(&temp_dio, buf+sizeof(header_t), sizeof(rpl_dio_t));
+                dio_input(header, temp_dio);
+            }
             break;
         case DAO:
             if(header.to_node==radio_->id())
             {
-                debug_->debug("node: %d received dao from: %d\n",radio_->id(),header.from_node);
+                debug_->debug("node: %x received dao from: %x\n",radio_->id(),header.from_node);
                 rpl_dao_t temp_dao;
                 memcpy(&temp_dao, buf+sizeof(header_t), sizeof(rpl_dao_t));
                 dao_input(header, temp_dao);
@@ -626,7 +677,7 @@ uint16_t min_high_tree_OF(metrics_t input_metrics)
         case DAO_ACK:
             if(header.to_node==radio_->id())
             {
-                debug_->debug("node: %d received DAO_ACK from: %d\n",radio_->id(),header.from_node);
+                debug_->debug("node: %x received DAO_ACK from: %x\n",radio_->id(),header.from_node);
                 rpl_dao_ack_t temp_dao_ack;
                 memcpy(&temp_dao_ack, buf+sizeof(header_t), sizeof(rpl_dao_ack_t));
                 handle_dao_ack(header, temp_dao_ack);
@@ -650,7 +701,7 @@ private:
         Os::Timer::self_pointer_t timer_;
         Os::Debug::self_pointer_t debug_;
 
-        uint16_t neighbors[NEIGHBOR_SIZE][NEIGHBOR_SIZE+1];
+        uint16_t neighbors[NEIGHBOR_SIZE][NEIGHBOR_WIDTH];
         uint8_t hops_;
         uint16_t temp_rank;
         rpl_dag_t rpl_dag_structure;
