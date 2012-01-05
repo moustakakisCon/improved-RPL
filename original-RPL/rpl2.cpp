@@ -1,6 +1,22 @@
-/*
- * Simple Wiselib Example
- */
+
+
+/******************************************************************************
+* This file is part of improved-RPL.
+*
+* improved-RPL is free software: you can redistribute it and/or modify
+* it under the terms of the GNU LesserGeneral Public License as published
+* by the Free Software Foundation, either version 3 of the License, or
+* any later version.
+*
+* improved-RPL is distributed in the hope that it will be useful,
+* but WITHOUT ANY WARRANTY; without even the implied warranty of
+* MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+* GNU Lesser General Public License for more details.
+*
+* You should have received a copy of the GNU Lesser General Public License
+* along with improved-RPL. If not, see <http://www.gnu.org/licenses/>.
+*******************************************************************************/
+
 #include "external_interface/external_interface.h"
 #include "algorithms/routing/tree/tree_routing.h"
 
@@ -505,13 +521,10 @@ void check_sent_timer ( void* )
             {
                 sent_timer_[i]=0xff;
                 sent_node_[i]=0xffff;
-                 //               debug_->debug("i1: %x", i);
             }
             else if(sent_timer_[i]>=4)
             {
                 dao_output(rpl_dag_structure, sent_node_[i]);
-                //debug_->debug("sent_timer: %x", sent_timer_[i]);
-               // debug_->debug("i2: %x", i);
             }
 
             if (sent_timer_[i] < 0xff)
@@ -567,7 +580,6 @@ void data_output ( uint16_t dest, uint16_t from, unsigned char input_data[DATA_S
            if(radio_->id()!=rpl_dag_structure.root)
            {
                 header.to_node=rpl_dag_structure.parent;
-                //debug_->debug("debug1 i: %x",i);
                 break;
            }
        }
@@ -648,8 +660,6 @@ uint16_t min_high_tree_OF(metrics_t input_metrics)
         {
         case NEIGHBOR_DIS:
             handle_neighbor_discovery(header);
-            // free(header);
-            //TODO: complete this
             break;
         case NEIGHBOR_DIS_ACK:
             if(header.to_node==radio_->id())
