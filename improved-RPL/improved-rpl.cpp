@@ -1,4 +1,3 @@
-
 /******************************************************************************
 * This file is part of improved-RPL.
 *
@@ -23,15 +22,17 @@
 #include <stdlib.h>
 #include <limits.h>
 
-#define ROOT_NODE 0x296
-#define SEND_TO 0000
-#define SEND_FROM 0x153d
+#define ROOT_NODE 0x0 //0x2028
+#define SEND_TO 000200
+#define SEND_FROM 6
 
-#define NEIGHBOR_SIZE 256 //65534 is the maximum value. do NOT set this bigger than 255 never!
+#define NEIGHBOR_SIZE 256 //256 //65534 is the maximum value. do NOT set this bigger than 255 never!
 
 
-#define ROUTN_WIDTH 256
+#define ROUTN_WIDTH 256 //256
 #define ROUTN_LEN 32
+
+#define PARENT_TIMEOUT 15
 
 #define OF_TO_USE 0x00
 #define MIN_HIGH_TREE 0x00
@@ -48,6 +49,8 @@
 #define UP 0
 #define DOWN 1
 #define DATA 7
+#define REPAIR 8
+#define DISBAND 9
 
 typedef wiselib::OSMODEL Os;
 
@@ -106,6 +109,7 @@ public:
         uint16_t root;
         uint16_t parent;
         char routN[ROUTN_LEN];
+        char previous_routN[ROUTN_LEN];
         metrics_t dag_metrics;
     };
     typedef rpl_dag rpl_dag_t;
@@ -164,7 +168,14 @@ public:
 
         rpl_dag_structure.of=OF_TO_USE;
 
+        memset(rpl_dag_structure.routN, NULL, ROUTN_LEN);
 
+        memset(rpl_dag_structure.previous_routN, NULL, ROUTN_LEN);
+
+        needs_repair_=0;
+        dao_flag=0;
+        /// na figei...
+        power=1;
 
         dao_counter=0;
         rpl_dag_structure.joined=0xff;
@@ -200,18 +211,39 @@ public:
         }
         if(radio_->id()==SEND_FROM)
         {
-            timer_->set_timer<rpl, &rpl::test_mess>( 30000, this, 0 );
+           timer_->set_timer<rpl, &rpl::test_mess>( 60000, this, 0 );
         }
+       // if(radio_->id()==4)
+       // {
+       //     timer_->set_timer<rpl, &rpl::deactivate>( 27000, this, 0 );
+       // }
         timer_->set_timer<rpl, &rpl::dio_output>( 2000, this, 0 );
+        timer_->set_timer<rpl, &rpl::check_pending>( 4000, this, 0 );
+
+        timer_->set_timer<rpl, &rpl::publish_routn>( 55000, this, 0 );
+    }
+//--------------------------------------------------------------------------------------------------------------------
+
+  void publish_routn( void* )
+    {
+        debug_->debug("node %x PUBLISHES routN %s\n", radio_->id(), rpl_dag_structure.routN);
+    }
+//--------------------------------------------------------------------------------------------------------------------
+    void deactivate ( void* )
+    {
+        power=0;
     }
 //--------------------------------------------------------------------------------------------------------------------
     void discover_neighbors( void* )
     {
-        header_t my_header;
-        my_header.type=NEIGHBOR_DIS;
-        my_header.from_node=radio_->id();
-        radio_->send( Os::Radio::BROADCAST_ADDRESS, sizeof(header_t), ( Os::Radio::block_data_t*)&my_header );
-        // timer_->set_timer<rpl, &rpl::discover_neighbors>( 2000, this, 0 );
+        if(power==1)
+        {
+            header_t my_header;
+            my_header.type=NEIGHBOR_DIS;
+            my_header.from_node=radio_->id();
+            radio_->send( Os::Radio::BROADCAST_ADDRESS, sizeof(header_t), ( Os::Radio::block_data_t*)&my_header );
+            timer_->set_timer<rpl, &rpl::discover_neighbors>( 10000, this, 0 );
+        }
     }
 
 //--------------------------------------------------------------------------------------------------------------------
@@ -219,6 +251,11 @@ public:
     void handle_neighbor_discovery (header_t inbox_header)
     {
         //  debug_->debug("node %x received nd from node %x",radio_->id(), inbox_header.from_ipv6[0]);
+        if (rpl_dag_structure.joined==0 && inbox_header.from_node==rpl_dag_structure.parent)
+        {
+            parent_timeout_=0;
+            //debug_->debug("node %d reseting parent_timeout\n",radio_->id());
+        }
         header_t header;
         header.type=NEIGHBOR_DIS_ACK;
 
@@ -232,6 +269,7 @@ public:
 
     void handle_neighbor_discovery_ack(header_t inbox_header)
     {
+
         bool used=false;
         uint16_t position=0xffff;
         for (uint16_t i=0; i<NEIGHBOR_SIZE; i++)
@@ -255,91 +293,160 @@ public:
 //--------------------------------------------------------------------------------------------------------------------
     void dio_output (void *)
     {
-        if((rpl_dag_structure.joined==0) && (strlen(rpl_dag_structure.routN)<ROUTN_LEN))
+        if(power==1)
         {
-            rpl_dio_t dio;
-
-            dio.id = radio_->id();
-            dio.dio_metrics = rpl_dag_structure.dag_metrics;
-            dio.version = rpl_dag_structure.version;
-            dio.instance_id = rpl_dag_structure.instance_id;
-            dio.root = rpl_dag_structure.root;
-            dio.hops = rpl_dag_structure.hops;
-
-            header_t header;
-            header.type=DIO;
-            header.from_node=radio_->id();
-            for (uint16_t i=0; i<=NEIGHBOR_SIZE; i++)
+            if((rpl_dag_structure.joined==0) && (strlen(rpl_dag_structure.routN)<ROUTN_LEN))
             {
-                if(neighbors[i]==0xffff)
-                {
-                    break;
-                }
-                else
-                {
-                    header.to_node=neighbors[i];
-                }
-                uint16_t size;
-                size = sizeof(header_t)+sizeof(rpl_dio_t);
-                unsigned char message[size];
-                memcpy(message, &header, sizeof(header_t));
-                memcpy(message+sizeof(header_t),&dio, sizeof(rpl_dio_t));
-                // debug_->debug("metric1: %x, version: %x", dio.dio_metrics.metric1, dio.version);
+                rpl_dio_t dio;
 
-                radio_->send( Os::Radio::BROADCAST_ADDRESS, size, message);
+                dio.id = radio_->id();
+                dio.dio_metrics = rpl_dag_structure.dag_metrics;
+                dio.version = rpl_dag_structure.version;
+                dio.instance_id = rpl_dag_structure.instance_id;
+                dio.root = rpl_dag_structure.root;
+                dio.hops = rpl_dag_structure.hops;
+
+                header_t header;
+                header.type=DIO;
+                header.from_node=radio_->id();
+
+                strncpy(header.from_routN, rpl_dag_structure.routN, strlen(rpl_dag_structure.routN));
+                for (uint16_t i=0; i<=NEIGHBOR_SIZE; i++)
+                {
+                    if(neighbors[i]==0xffff)
+                    {
+                        break;
+                    }
+                    else
+                    {
+                        header.to_node=neighbors[i];
+                    }
+                    uint16_t size;
+                    size = sizeof(header_t)+sizeof(rpl_dio_t);
+                    unsigned char message[size];
+                    memcpy(message, &header, sizeof(header_t));
+                    memcpy(message+sizeof(header_t),&dio, sizeof(rpl_dio_t));
+                    // debug_->debug("metric1: %x, version: %x", dio.dio_metrics.metric1, dio.version);
+
+                    radio_->send( Os::Radio::BROADCAST_ADDRESS, size, message);
+                }
             }
+
+            timer_->set_timer<rpl, &rpl::dio_output>( 2000, this, 0 );
+
         }
-
-        timer_->set_timer<rpl, &rpl::dio_output>( 2000, this, 0 );
-
     }
 
 //--------------------------------------------------------------------------------------------------------------------
     void dio_input (header_t header, rpl_dio_t input_dio, uint8_t LQI)
     {
-        if(rpl_dag_structure.joined!=0) // auto tha figei
+
+        if((rpl_dag_structure.joined!=0)) /* auto tha figei */ //&& (strncmp(header.from_routN, rpl_dag_structure.previous_routN, strlen(rpl_dag_structure.previous_routN))!=0))
         {
+            //debug_->debug("RESULTTTTTTTTT: %d",strncmp(header.from_routN, rpl_dag_structure.previous_routN, strlen(rpl_dag_structure.previous_routN)));
 
-            uint16_t i;
-            for (i=0; i<=NEIGHBOR_SIZE; i++)
+            if((strlen(rpl_dag_structure.previous_routN)>0) )
             {
-                if(i==NEIGHBOR_SIZE || i==0xffff)
+                if((strncmp(header.from_routN, rpl_dag_structure.previous_routN, strlen(rpl_dag_structure.previous_routN)-2)==0))
                 {
-                    break;
+                    //do nothing
                 }
-
-                if(neighbors[i]==header.from_node)
+                else
                 {
-                    break;
+                    {
+
+                        uint16_t i;
+                        for (i=0; i<=NEIGHBOR_SIZE; i++)
+                        {
+                            if(i==NEIGHBOR_SIZE || i==0xffff)
+                            {
+                                break;
+                            }
+
+                            if(neighbors[i]==header.from_node)
+                            {
+                                break;
+                            }
+                        }
+
+                        if(i!=NEIGHBOR_SIZE)
+                        {
+
+                            switch(rpl_dag_structure.of)
+                            {
+                            case MIN_HIGH_TREE:
+                                temp_rank=min_high_tree_OF(input_dio.dio_metrics, LQI);
+                                // debug_->debug("node %d temp_rank: %d\n",radio_->id(),temp_rank);
+                                break;
+                            }
+
+                            if(temp_rank<rpl_dag_structure.rank)
+                            {
+                                rpl_dag_structure.rank = temp_rank;
+                                rpl_dag_structure.hops = input_dio.hops + 1;
+                                rpl_dag_structure.parent = input_dio.id;
+                                rpl_dag_structure.version = input_dio.version;
+                                rpl_dag_structure.dag_metrics.metric1 = input_dio.dio_metrics.metric1+1;
+                                rpl_dag_structure.root = input_dio.root;
+                                if(radio_->id()!=ROOT_NODE && dao_flag!=1)
+                                {
+                                    timer_->set_timer<rpl, &rpl::call_dao_output>( 2000, this, 0 );
+                                    dao_flag=1;
+                                }
+                                debug_->debug("node %x (hops= %x) with rank %d rejoined to parrent %x ,%s, %s\n", radio_->id(),rpl_dag_structure.hops,rpl_dag_structure.rank, rpl_dag_structure.parent, rpl_dag_structure.previous_routN ,header.from_routN);
+                                dao_counter=0;
+
+                            }
+                        }
+                    }
                 }
             }
-
-            if(i!=NEIGHBOR_SIZE)
+            else
             {
 
-                switch(rpl_dag_structure.of)
+                uint16_t i;
+                for (i=0; i<=NEIGHBOR_SIZE; i++)
                 {
-                case MIN_HIGH_TREE:
-                    temp_rank=min_high_tree_OF(input_dio.dio_metrics, LQI);
-                    // debug_->debug("node %d temp_rank: %d\n",radio_->id(),temp_rank);
-                    break;
+                    if(i==NEIGHBOR_SIZE || i==0xffff)
+                    {
+                        break;
+                    }
+
+                    if(neighbors[i]==header.from_node)
+                    {
+                        break;
+                    }
                 }
 
-                if(temp_rank<rpl_dag_structure.rank)
+                if(i!=NEIGHBOR_SIZE)
                 {
-                    rpl_dag_structure.rank = temp_rank;
-                    rpl_dag_structure.hops = input_dio.hops + 1;
-                    rpl_dag_structure.parent = input_dio.id;
-                    rpl_dag_structure.version = input_dio.version;
-                    rpl_dag_structure.dag_metrics.metric1 = input_dio.dio_metrics.metric1+1;
-                    rpl_dag_structure.root = input_dio.root;
-                    if(radio_->id()!=ROOT_NODE)
-                    {
-                        timer_->set_timer<rpl, &rpl::call_dao_output>( 2000, this, 0 );
-                    }
-                    debug_->debug("node %x (hops= %x) with rank %d joined to parrent %x (metric1= %x)\n", radio_->id(),rpl_dag_structure.hops,rpl_dag_structure.rank, rpl_dag_structure.parent, input_dio.dio_metrics.metric1);
-                    dao_counter=0;
 
+                    switch(rpl_dag_structure.of)
+                    {
+                    case MIN_HIGH_TREE:
+                        temp_rank=min_high_tree_OF(input_dio.dio_metrics, LQI);
+                        // debug_->debug("node %d temp_rank: %d\n",radio_->id(),temp_rank);
+                        break;
+                    }
+
+                    if(temp_rank<rpl_dag_structure.rank)
+                    {
+
+                        rpl_dag_structure.rank = temp_rank;
+                        rpl_dag_structure.hops = input_dio.hops + 1;
+                        rpl_dag_structure.parent = input_dio.id;
+                        rpl_dag_structure.version = input_dio.version;
+                        rpl_dag_structure.dag_metrics.metric1 = input_dio.dio_metrics.metric1+1;
+                        rpl_dag_structure.root = input_dio.root;
+                        if(radio_->id()!=ROOT_NODE && dao_flag!=1)
+                        {
+                            timer_->set_timer<rpl, &rpl::call_dao_output>( 2000, this, 0 );
+                            dao_flag=1;
+                        }
+                        debug_->debug("node %x (hops= %x) with rank %d joined to parrent %x (metric1= %x)\n", radio_->id(),rpl_dag_structure.hops,rpl_dag_structure.rank, rpl_dag_structure.parent, input_dio.dio_metrics.metric1);
+                        dao_counter=0;
+
+                    }
                 }
             }
         }
@@ -457,6 +564,11 @@ public:
             memcpy(message, &header, sizeof(header_t));
             memcpy(message+sizeof(header_t),&dao_res, sizeof(rpl_dao_response_t));
             radio_->send( Os::Radio::BROADCAST_ADDRESS, size, message);
+            if(needs_repair_==1)
+            {
+                debug_->debug("node %d rejoined\n", radio_->id());
+                send_repair();
+            }
         }
     }
 //--------------------------------------------------------------------------------------------------------------------
@@ -471,7 +583,35 @@ public:
 //--------------------------------------------------------------------------------------------------------------------
     void check_pending ( void* )
     {
+        //debug_->debug("test\n");
+        //repair procedure
 
+        if((parent_timeout_<=PARENT_TIMEOUT) && (rpl_dag_structure.joined==0))
+        {
+
+            if ((rpl_dag_structure.joined==0) &&(radio_->id() != ROOT_NODE))
+            {
+                parent_timeout_++;
+               // debug_->debug("node %d increasing parent timeout at %d \n", radio_->id(), parent_timeout_);
+            }
+        }
+        else if((parent_timeout_>PARENT_TIMEOUT) && (rpl_dag_structure.joined==0))
+        {
+            debug_->debug("node %d lost its parent\n", radio_->id());
+            rpl_dag_structure.root=0xffff;
+
+            rpl_dag_structure.rank=0xffff;
+
+            rpl_dag_structure.dag_metrics.metric1=0xffff;
+
+            rpl_dag_structure.joined=0xff;
+            strcpy(rpl_dag_structure.previous_routN, rpl_dag_structure.routN);
+            // debug_->debug("QUICK DEBUG: %s\n", rpl_dag_structure.routN);
+
+            memset(rpl_dag_structure.routN, NULL, ROUTN_LEN);
+            needs_repair_=1;
+            ///TODO: Repair();
+        }
 
         for(uint8_t i=0; i<= ROUTN_WIDTH-1; i++)
         {
@@ -508,7 +648,7 @@ public:
 //--------------------------------------------------------------------------------------------------------------------
     void data_output ( char dest[ROUTN_LEN], char from[ROUTN_LEN], char input_data[DATA_SIZE])
     {
-        debug_->debug("%x will try to send\n",radio_->id());
+        //debug_->debug("%x will try to send\n",radio_->id());
 
         header_t header;
         rpl_data_t rpl_data;
@@ -517,12 +657,14 @@ public:
 
         if(strncmp(rpl_dag_structure.routN, dest, strlen(rpl_dag_structure.routN))==0)
         {
-            debug_->debug("node %x tries to send DOWN\n",radio_->id());
+            //debug_->debug("%s : %s : %d\n",rpl_dag_structure.routN,dest,strlen(rpl_dag_structure.routN));
+            //debug_->debug("%d\n",strncmp(rpl_dag_structure.routN, dest, strlen(rpl_dag_structure.routN)));
+            //debug_->debug("node %x tries to send DOWN\n",radio_->id());
             rpl_data.direction=DOWN;
         }
         else
         {
-            debug_->debug("node %x tries to send UP\n",radio_->id());
+            //debug_->debug("node %x tries to send UP\n",radio_->id());
             rpl_data.direction=UP;
         }
         rpl_data.hops=rpl_dag_structure.hops;
@@ -548,37 +690,162 @@ public:
         //debug_->debug("node %d received DATA:1\n",radio_->id());
         //debug_->debug("node %d: debug 1: direction: %d, from: %s, routN %s, routN len: %d, hops: %d\n",radio_->id(),input_data.direction,inbox_header.from_routN,rpl_dag_structure.routN,strlen(rpl_dag_structure.routN),input_data.hops );
         if((input_data.direction==UP) && (strncmp(rpl_dag_structure.routN, inbox_header.from_routN,strlen(rpl_dag_structure.routN))==0) && (input_data.hops==rpl_dag_structure.hops+1))
-        //if ((strncmp(inbox_header.from_routN, inbox_header.to_routN, strlen(rpl_dag_structure.routN)+2)!=0) && (strlen(inbox_header.from_routN)==strlen(rpl_dag_structure.routN)+2))
+            //if ((strncmp(inbox_header.from_routN, inbox_header.to_routN, strlen(rpl_dag_structure.routN)+2)!=0) && (strlen(inbox_header.from_routN)==strlen(rpl_dag_structure.routN)+2))
         {
             // debug_->debug("node %d received DATA:2\n",radio_->id());
             if(strcmp(inbox_header.to_routN,rpl_dag_structure.routN)==0)
             {
-                debug_->debug("received DATA to %s, from: %s, data: %s\n", rpl_dag_structure.routN,inbox_header.from_routN, input_data.payload);
+                //debug_->debug("received DATA to %s, from: %s, data: %s\n", rpl_dag_structure.routN,inbox_header.from_routN, input_data.payload);
+                //debug_->debug("received DATA to %s, data: %s\n", rpl_dag_structure.routN, input_data.payload);
             }
             else //if(strncmp(inbox_header.from_routN, rpl_dag_structure.routN, strlen(rpl_dag_structure.routN))==0)
             {
-               // debug_->debug("resending from %s\n",rpl_dag_structure.routN);
+                // debug_->debug("resending from %s\n",rpl_dag_structure.routN);
                 data_output(inbox_header.to_routN, inbox_header.from_routN, input_data.payload);
             }
         }
         else if((input_data.direction==DOWN) && (strncmp(rpl_dag_structure.routN, inbox_header.to_routN, strlen(rpl_dag_structure.routN))==0) && (input_data.hops==rpl_dag_structure.hops-1))
-        //else if((strncmp(inbox_header.from_routN, rpl_dag_structure.routN, strlen(rpl_dag_structure.routN)-2)==0) && (strlen(inbox_header.from_routN)==strlen(rpl_dag_structure.routN)-2))
+            //else if((strncmp(inbox_header.from_routN, rpl_dag_structure.routN, strlen(rpl_dag_structure.routN)-2)==0) && (strlen(inbox_header.from_routN)==strlen(rpl_dag_structure.routN)-2))
         {
             if(strcmp(inbox_header.to_routN,rpl_dag_structure.routN)==0)
             {
-                debug_->debug("received DATA to %s, from: %s, data: %s\n", rpl_dag_structure.routN,inbox_header.from_routN, input_data.payload);
+                //debug_->debug("received DATA to %s, from: %s, data: %s\n", rpl_dag_structure.routN,inbox_header.from_routN, input_data.payload);
+                //debug_->debug("received DATA to %s, data: %s\n", rpl_dag_structure.routN, input_data.payload);
             }
             else //if(strncmp(inbox_header.to_routN, rpl_dag_structure.routN, strlen(rpl_dag_structure.routN))==0)
             {
-               // debug_->debug("resending from %s\n",rpl_dag_structure.routN);
+                // debug_->debug("resending from %s\n",rpl_dag_structure.routN);
                 data_output(inbox_header.to_routN, inbox_header.from_routN ,input_data.payload);
             }
         }
     }
 //--------------------------------------------------------------------------------------------------------------------
+    void send_repair()
+    {
+        if(strlen(rpl_dag_structure.routN)==ROUTN_LEN)
+        {
+            //SEND disband message
+            send_disband();
+        }
+        else
+        {
+            //generate new routN for each child.
+            for(uint8_t i=0; i<ROUTN_WIDTH; i++)
+            {
+                if(i==0xff)
+                {
+                    break;
+                }
+                if (given[i]==true)
+                {
+                    //send message
+                    header_t header;
+                    header.type=REPAIR;
+                    header.from_node=radio_->id();
+
+                    uint8_t j, k;
+                    char next[2];
+                    char hex[]= {"0123456789abcdef"};
+
+                    j=i/16;
+                    k=i%16;
+
+                    sprintf(next,"%c%c",hex[j],hex[k]);
+                    strcpy(header.from_routN, rpl_dag_structure.routN);
+                    strcat(header.from_routN,next);
+                    strcpy(header.to_routN,rpl_dag_structure.previous_routN);
+                    strcat(header.to_routN,next);
+
+                    uint16_t size;
+                    size = sizeof(header_t);
+                    unsigned char message[size];
+                    memcpy(message, &header, sizeof(header_t));
+
+                    radio_->send( Os::Radio::BROADCAST_ADDRESS, sizeof(header_t), message);
+                }
+            }
+            debug_->debug("node %d send repair\n", radio_->id());
+        }
+    }
+
+//--------------------------------------------------------------------------------------------------------------------
+
+    void handle_repair(header_t inbox_header)
+    {
+
+        if(strncmp(rpl_dag_structure.routN, inbox_header.to_routN, strlen(rpl_dag_structure.routN))==0 && (inbox_header.from_node==rpl_dag_structure.parent))
+        {
+            //change prefix
+            strcpy(rpl_dag_structure.previous_routN, rpl_dag_structure.routN);
+            memset(rpl_dag_structure.routN, NULL, ROUTN_LEN);
+            strcpy(rpl_dag_structure.routN, inbox_header.from_routN);
+            debug_->debug("node %d repaired\n", radio_->id());
+            debug_->debug("node %d received repair from %d, with to_routN: %s, from_routN: %s\n", radio_->id(), inbox_header.from_node, inbox_header.to_routN, inbox_header.from_routN);
+            send_repair();
+        }
+    }
+
+//--------------------------------------------------------------------------------------------------------------------
+    void send_disband ()
+    {
+        for(uint8_t i=0; i<ROUTN_WIDTH; i++)
+        {
+            if(i==0xff)
+            {
+                break;
+            }
+            if (given[i]==true)
+            {
+                header_t header;
+                header.type=DISBAND;
+                header.from_node=radio_->id();
+
+                uint8_t j, k;
+                char next[2];
+                char hex[]= {"0123456789abcdef"};
+
+                j=i/16;
+                k=i%16;
+
+                sprintf(next,"%c%c",hex[j],hex[k]);
+                strcpy(header.from_routN, rpl_dag_structure.routN);
+                strcpy(header.to_routN,rpl_dag_structure.routN);
+                strcat(header.to_routN,next);
+
+                uint16_t size;
+                size = sizeof(header_t);
+                unsigned char message[size];
+                memcpy(message, &header, sizeof(header_t));
+
+                radio_->send( Os::Radio::BROADCAST_ADDRESS, sizeof(header_t), message);
+            }
+        }
+        debug_->debug("node %d send disband\n", radio_->id());
+
+    }
+//--------------------------------------------------------------------------------------------------------------------
+    void handle_disband ( header_t inbox_header )
+    {
+        if(strncmp(rpl_dag_structure.routN, inbox_header.to_routN, strlen(rpl_dag_structure.routN))==0 && (inbox_header.from_node==rpl_dag_structure.parent))
+        {
+            rpl_dag_structure.root=0xffff;
+            rpl_dag_structure.rank=0xffff;
+            rpl_dag_structure.dag_metrics.metric1=0xffff;
+            rpl_dag_structure.joined=0xff;
+            rpl_dag_structure.of=OF_TO_USE;
+            memset(rpl_dag_structure.routN, NULL, ROUTN_LEN);
+            memset(rpl_dag_structure.previous_routN, NULL, ROUTN_LEN);
+
+            send_disband();
+        }
+
+    }
+//--------------------------------------------------------------------------------------------------------------------
     void test_mess( void* )
     {
-        data_output("000001",rpl_dag_structure.routN,"test");
+        for(message_counter=0;message_counter<100000;message_counter++){
+        data_output("0001000000",rpl_dag_structure.routN,"test_data");
+        }
     }
 //--------------------------------------------------------------------------------------------------------------------
 //--------------------------------------------------------------------------------------------------------------------
@@ -641,6 +908,12 @@ public:
             memcpy(&temp_data, buf+sizeof(header_t), sizeof(rpl_data_t));
             data_input(header,temp_data);
             break;
+        case REPAIR:
+            handle_repair(header);
+            break;
+        case DISBAND:
+            handle_disband(header);
+            break;
         }
     }
 //--------------------------------------------------------------------------------------------------------------------
@@ -683,7 +956,12 @@ private:
     rpl_dag_t rpl_dag_structure;
     uint16_t neighbors[NEIGHBOR_SIZE];
     uint8_t sequence_counter_;
+    uint8_t parent_timeout_;
     uint16_t temp_rank;
+    uint8_t dao_flag;
+    uint32_t message_counter;
+    uint8_t needs_repair_;
+    uint8_t power;
     uint8_t dao_counter;
     bool given[ROUTN_WIDTH];
     uint16_t pending[ROUTN_WIDTH][2];
